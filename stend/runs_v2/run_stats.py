@@ -8,8 +8,11 @@
 Б3. Перестановочный тест для сравнения P0 и P2 и парный критерий Уилкоксона
     по фолдам. Единица перестановки — идентичность.
 
-Вход: outputs/track_b/decomposition_v2.json (+ *_pooled_predictions.npz)
-Выход: outputs/track_b/bootstrap_contributions.json, significance_tests.json
+Вход:  разложение, путь задаётся переменной VKR_STATS_SRC
+Выход: bootstrap_contributions<SUF>.json и significance_tests<SUF>.json,
+       суффикс задаётся переменной VKR_STATS_SUFFIX.
+Итоговые интервалы работы: VKR_STATS_SRC=decomposition_24_embargofix.json,
+VKR_STATS_SUFFIX=_24embargofix.
 """
 import os, sys, json, time, platform
 import numpy as np

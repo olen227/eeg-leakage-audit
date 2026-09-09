@@ -7,7 +7,8 @@
 Оценочная схема: LOIO-CV — leave-one-identity-out, фактическим перебором фолдов.
 Ни одно число не вписывается константой.
 
-Выход: outputs/track_b/decomposition_v2.json
+Выход: outputs/track_b/<tag>.json, имя задаётся ключом --tag.
+Итоговые числа работы получены с --tag decomposition_24 на кэше полного набора.
 """
 import os, sys, json, time, platform, argparse
 import numpy as np
