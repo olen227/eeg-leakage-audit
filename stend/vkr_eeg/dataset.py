@@ -11,6 +11,8 @@ def fit_train_stats(train_subjects, manifest):
             raw = data.load_edf(s, fn)
             if raw is None: continue
             raw.filter(C.BANDPASS[0], C.BANDPASS[1], verbose="ERROR")
+            # Режекция сетевой наводки избыточна: полосовой 0,5-40 Гц уже подавляет
+            # и 50, и 60 Гц, поэтому отказ режекторного фильтра на данные не влияет.
             try: raw.notch_filter(C.NOTCH, verbose="ERROR")
             except Exception: pass
             d = raw.get_data()

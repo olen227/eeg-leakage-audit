@@ -84,6 +84,10 @@ def load_siena_raw(path, notch_hz):
     ra = mne.io.RawArray(bip, info, verbose="ERROR")
     ra.filter(C.BANDPASS[0], C.BANDPASS[1], verbose="ERROR")
     if notch_hz:
+        # Режекция сетевой наводки избыточна по построению: полосовой фильтр
+        # 0,5-40 Гц уже подавляет и 50, и 60 Гц. Отказ фильтра на отдельной
+        # записи (например, при иной частоте дискретизации) поэтому безвреден
+        # и на данные не влияет.
         try:
             ra.notch_filter(notch_hz, verbose="ERROR")
         except Exception:

@@ -157,6 +157,10 @@ def main():
         info = mne.create_info(C.CANONICAL_CHANNELS, C.SFREQ, ch_types="eeg")
         ra = mne.io.RawArray(bip, info, verbose="ERROR")
         ra.filter(C.BANDPASS[0], C.BANDPASS[1], verbose="ERROR")
+        # Режекция сетевой наводки избыточна по построению: полосовой фильтр
+        # 0,5-40 Гц уже подавляет и 50, и 60 Гц. Отказ фильтра на отдельной
+        # записи (например, при иной частоте дискретизации) поэтому безвреден
+        # и на данные не влияет.
         try:
             ra.notch_filter(NOTCH_EU, verbose="ERROR")
         except Exception:

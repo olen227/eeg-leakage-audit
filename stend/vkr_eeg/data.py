@@ -47,6 +47,8 @@ def preprocess(raw, fit_stats=None):
     Если fit_stats=None — возвращает статистики (режим fit на train)."""
     raw = raw.copy()
     raw.filter(C.BANDPASS[0], C.BANDPASS[1], verbose="ERROR")
+    # Режекция сетевой наводки избыточна: полосовой 0,5-40 Гц уже подавляет и 50,
+    # и 60 Гц, поэтому отказ режекторного фильтра на содержимое окон не влияет.
     try:
         raw.notch_filter(C.NOTCH, verbose="ERROR")
     except Exception:

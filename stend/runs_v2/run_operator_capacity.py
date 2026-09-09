@@ -66,7 +66,10 @@ def load_subject(sdir, max_win):
             continue
         try:
             r = mne.io.read_raw_edf(os.path.join(sdir, f), preload=True, verbose="ERROR")
-        except Exception:
+        except Exception as e:
+            # Диагностический эксперимент на постороннем наборе: нечитаемая запись
+            # пропускается, но об этом сообщается, чтобы состав выборки был известен.
+            print(f"  не прочитан {f}: {type(e).__name__}: {e}", flush=True)
             continue
         ren = {ch: ch.upper().replace(".", "").replace(" ", "") for ch in r.ch_names}
         r.rename_channels(ren)
@@ -82,6 +85,10 @@ def load_subject(sdir, max_win):
         info = mne.create_info(C.CANONICAL_CHANNELS, C.SFREQ, ch_types="eeg")
         ra = mne.io.RawArray(bip, info, verbose="ERROR")
         ra.filter(C.BANDPASS[0], C.BANDPASS[1], verbose="ERROR")
+        # Режекция сетевой наводки избыточна по построению: полосовой фильтр
+        # 0,5-40 Гц уже подавляет и 50, и 60 Гц. Отказ фильтра на отдельной
+        # записи (например, при иной частоте дискретизации) поэтому безвреден
+        # и на данные не влияет.
         try:
             ra.notch_filter(C.NOTCH, verbose="ERROR")
         except Exception:

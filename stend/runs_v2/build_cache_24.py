@@ -61,6 +61,7 @@ def estimate_windows(subjects, man):
     import re as _re
     need = set(C.CANONICAL_CHANNELS)
     total = 0
+    unreadable = []
     for s in subjects:
         for fn in man[s]["seizure"] + man[s]["interictal"]:
             p = os.path.join(C.DATA_ROOT, "chbmit", s, fn)
@@ -78,8 +79,18 @@ def estimate_windows(subjects, man):
                     continue                      # будет отброшен load_edf
                 n = int(raw.n_times * (C.SFREQ / raw.info["sfreq"]))
                 total += max(0, (n - WIN) // STEP + 1)
-            except Exception:
+            except Exception as e:
+                # Нечитаемый файл не попадает в оценку размера массива. Массив
+                # выделяется с запасом, поэтому недобор безвреден, но число таких
+                # файлов сообщается: молча пропущенный файл — это расхождение
+                # между манифестом и фактическим составом среза.
+                unreadable.append((s, fn, f"{type(e).__name__}: {e}"))
                 continue
+    if unreadable:
+        print(f"ВНИМАНИЕ: при предварительном подсчёте не прочитано файлов: "
+              f"{len(unreadable)}", flush=True)
+        for sub, fn, err in unreadable:
+            print(f"    {sub}/{fn}: {err}", flush=True)
     return total
 
 
@@ -135,6 +146,10 @@ def main():
                 continue
             r = raw.copy()
             r.filter(C.BANDPASS[0], C.BANDPASS[1], verbose="ERROR")
+            # Режекция сетевой наводки избыточна по построению: полосовой фильтр
+            # 0,5-40 Гц уже подавляет и 50, и 60 Гц. Отказ фильтра на отдельной
+            # записи (например, при иной частоте дискретизации) поэтому безвреден
+            # и на данные не влияет.
             try:
                 r.notch_filter(C.NOTCH, verbose="ERROR")
             except Exception:
