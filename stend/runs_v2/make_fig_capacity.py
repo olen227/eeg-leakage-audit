@@ -52,7 +52,7 @@ def main():
     ax2.set_axisbelow(True)
     for s in ("top","right"): ax2.spines[s].set_visible(False)
 
-    fig.suptitle("Рисунок 3.9 — Зависимость измеряемого завышения от мощности модели\n"
+    fig.suptitle("Рисунок 16 – Зависимость измеряемого завышения от мощности модели\n"
                  f"Δ: {ru(C['delta_v1_mean'],True)} → {ru(C['delta_v2_mean'],True)} "
                  f"(в {str(round(C['ratio'],2)).replace('.',',')} раза), прирост "
                  f"[{ru(C['gain_diff_ci'][0],True)}; {ru(C['gain_diff_ci'][1],True)}], "
