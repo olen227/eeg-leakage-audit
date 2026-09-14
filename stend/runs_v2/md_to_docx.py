@@ -14,6 +14,7 @@
   * цитаты `>` — с отступом и уменьшенным кеглем (служебные примечания);
   * блоки кода в тройных апострофах — ДОСЛОВНО, моноширинным шрифтом, по строке
     на абзац;
+  * пункты списков — отдельными абзацами с втяжкой, разделители `---` опускаются;
   * формульные вставки `$...$` разворачиваются в обычный текст: запись `0{,}1531`
     приводится к виду `0,1531`, служебные символы снимаются.
 
@@ -106,6 +107,23 @@ def code_block(doc, lines):
         r.font.size = Pt(9)
 
 
+def list_item(doc, text, marker):
+    """Пункт списка отдельным абзацем: маркер сохраняется, отступа первой строки нет.
+
+    Без этой ветви подряд идущие пункты попадали в общий сбор «обычного абзаца»
+    и склеивались в одну строку через пробел, теряя структуру перечня.
+    """
+    p = doc.add_paragraph()
+    pf = p.paragraph_format
+    pf.line_spacing = 1.5
+    pf.space_after = Pt(0)
+    pf.first_line_indent = Cm(0)
+    pf.left_indent = Cm(1.0)
+    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    add_runs(p, demath(f"{marker} {text}"))
+    return p
+
+
 def table(doc, rows):
     head = [c.strip() for c in rows[0].strip("|").split("|")]
     data = [[c.strip() for c in r.strip("|").split("|")] for r in rows[2:]]
@@ -140,7 +158,7 @@ def convert(src, dst):
         sec.top_margin, sec.bottom_margin = Mm(20), Mm(20)
 
     lines = open(src, encoding="utf-8").read().split("\n")
-    i, n_tab, n_head, n_fig, n_code = 0, 0, 0, 0, 0
+    i, n_tab, n_head, n_fig, n_code, n_list = 0, 0, 0, 0, 0, 0
     while i < len(lines):
         ln = lines[i]
         s = ln.strip()
@@ -198,6 +216,27 @@ def convert(src, dst):
                 r.italic = True
             continue
 
+        # горизонтальная линейка разметки — служебный разделитель, в документ не идёт
+        if set(s) <= set("-*_") and len(s) >= 3:
+            i += 1
+            continue
+
+        # пункт маркированного или нумерованного списка — отдельным абзацем
+        m = re.match(r"^([-*+]|\d+[.)])\s+(.*)$", s)
+        if m:
+            marker = "—" if m.group(1) in "-*+" else m.group(1)
+            text = m.group(2).strip()
+            i += 1
+            # продолжение пункта: строки с отступом до пустой строки или нового пункта
+            while (i < len(lines) and lines[i].strip()
+                   and not re.match(r"^([-*+]|\d+[.)])\s+", lines[i].strip())
+                   and not lines[i].strip().startswith(("#", "|", ">", "```"))):
+                text += " " + lines[i].strip()
+                i += 1
+            list_item(doc, text, marker)
+            n_list += 1
+            continue
+
         # обычный абзац: склеить до пустой строки
         block = []
         while i < len(lines) and lines[i].strip() and not lines[i].strip().startswith(("#", "|", ">", "```", "[РИСУНОК")):
@@ -206,11 +245,11 @@ def convert(src, dst):
         body(doc, demath(" ".join(block)))
 
     doc.save(dst)
-    return n_head, n_tab, n_fig, n_code
+    return n_head, n_tab, n_fig, n_code, n_list
 
 
 if __name__ == "__main__":
     src, dst = sys.argv[1], sys.argv[2]
-    h, t, f, c = convert(src, dst)
+    h, t, f, c, l = convert(src, dst)
     print(f"{dst}: заголовков {h}, таблиц {t}, мест под рисунки {f}, "
-          f"блоков кода {c}, {os.path.getsize(dst)/1024:.0f} КБ")
+          f"блоков кода {c}, пунктов списков {l}, {os.path.getsize(dst)/1024:.0f} КБ")

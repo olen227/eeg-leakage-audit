@@ -87,7 +87,6 @@ def main():
     A("`stend/runs_v2/protocols.py` с нумерацией строк.")
     A("")
     A(f"Дата формирования листингов: {datetime.date.today().strftime('%d.%m.%Y')}.")
-    A(f"Корень проекта: `{ROOT}`.")
     A("")
     A("Листинги сгенерированы автоматическим чтением файлов из репозитория проекта")
     A("скриптом `stend/tools/gen_listings.py`; текст кода не редактировался. Для")
@@ -105,7 +104,9 @@ def main():
     A("")
     A("| № | Модуль | Строк |")
     A("| --- | --- | --- |")
-    for rel, num, _hdr, size in ORDER:
+    for rel, num, _hdr, _size in ORDER:
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            size = len(f.read().splitlines())
         A(f"| {num} | `{rel}` | {size} |")
     A("")
     tot = 0
