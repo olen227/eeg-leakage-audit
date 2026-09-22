@@ -113,32 +113,51 @@ def make_fold(identity_of_subject, subj, fileid, t_abs, held_identity, seed,
     """Строит индексы eval и train-части всех протоколов для одного фолда.
 
     y — метки приступа по окнам; нужны для стратификации отбора отложенных файлов.
+
+    held_identity — одна идентичность (строка) или ГРУППА идентичностей (список,
+    кортеж, множество). Группа нужна для наборов, где перебор по одной идентичности
+    неподъёмен по времени: в TUSZ 675 пациентов, и при часе на фолд LOIO занял бы
+    месяц. Тогда идентичности делятся на K групп, и каждая группа откладывается
+    целиком. Схема каскада при этом та же: отложенные файлы выбираются внутри КАЖДОЙ
+    идентичности группы, чтобы каждый пациент группы был представлен в eval, а
+    «прочие идентичности» — все, кто не в группе.
     """
     rng = np.random.default_rng(seed)
     ident = np.array([identity_of_subject[s] for s in subj])
-    in_I = ident == held_identity
+    held = ([held_identity] if isinstance(held_identity, str)
+            else sorted(set(held_identity)))
+    in_I = np.isin(ident, held)
     others = np.where(~in_I)[0]
 
-    # отложенные файлы идентичности I — отбор стратифицирован по наличию приступа
-    files_I = sorted(set(zip(subj[in_I].tolist(), fileid[in_I].tolist())))
-    if y is None:
-        has_sz = {f: False for f in files_I}
-    else:
-        has_sz = {}
-        for (a, b) in files_I:
-            sel = (subj == a) & (fileid == b)
-            has_sz[(a, b)] = bool(y[sel].sum() > 0)
-    sz_files = [f for f in files_I if has_sz[f]]
-    pl_files = [f for f in files_I if not has_sz[f]]
-    E = set()
-    for group, frac in ((sz_files, FILE_HOLDOUT_SEIZURE), (pl_files, FILE_HOLDOUT_PLAIN)):
-        if not group:
-            continue
-        pm = rng.permutation(len(group))
-        k = max(1, int(round(len(group) * frac)))
-        E |= {group[i] for i in pm[:k]}
-
+    # Признак «в файле есть приступ» считается одним проходом по окнам: перебор
+    # файлов с маской (subj == a) & (fileid == b) на каждом стоил O(файлов × окон)
+    # и на 1,2 млн окон TUSZ занял бы часы.
     key = np.array([f"{a}|{b}" for a, b in zip(subj, fileid)])
+    uniq, inv = np.unique(key, return_inverse=True)
+    if y is None:
+        file_has_sz = np.zeros(len(uniq), dtype=bool)
+    else:
+        file_has_sz = np.bincount(inv, weights=y, minlength=len(uniq)) > 0
+    has_sz_of = dict(zip(uniq.tolist(), file_has_sz.tolist()))
+
+    # отложенные файлы — отбор стратифицирован по наличию приступа, отдельно
+    # для каждой идентичности группы (порядок идентичностей фиксирован сортировкой,
+    # поэтому результат при том же seed воспроизводим)
+    E = set()
+    files_I = []
+    for I in held:
+        m = ident == I
+        files_one = sorted(set(zip(subj[m].tolist(), fileid[m].tolist())))
+        files_I.extend(files_one)
+        sz_files = [f for f in files_one if has_sz_of[f"{f[0]}|{f[1]}"]]
+        pl_files = [f for f in files_one if not has_sz_of[f"{f[0]}|{f[1]}"]]
+        for group, frac in ((sz_files, FILE_HOLDOUT_SEIZURE), (pl_files, FILE_HOLDOUT_PLAIN)):
+            if not group:
+                continue
+            pm = rng.permutation(len(group))
+            k = max(1, int(round(len(group) * frac)))
+            E |= {group[i] for i in pm[:k]}
+
     E_key = {f"{a}|{b}" for a, b in E}
     in_E = in_I & np.isin(key, list(E_key))
 
@@ -166,6 +185,7 @@ def make_fold(identity_of_subject, subj, fileid, t_abs, held_identity, seed,
         "eval": eval_idx,
         "train": {"P0": P0, "P1": P1, "P1e": P1e, "P2": P2},
         "held_identity": held_identity,
+        "held_identities": held,
         "n_files_held": len(E),
         "n_files_total_I": len(files_I),
         "embargo_removed": int(len(P1) - len(P1e)),
@@ -181,7 +201,9 @@ def fold_norm_stats(X, train_idx, chunk=8192):
     s2 = np.zeros(n_ch, dtype=np.float64)
     cnt = 0
     for k in range(0, len(train_idx), chunk):
-        b = X[train_idx[k:k + chunk]]
+        # приведение к float32 обязательно: кэш может храниться в float16 (TUSZ), а
+        # суммирование в half-точности накапливает ошибку и переполняется
+        b = np.asarray(X[train_idx[k:k + chunk]], dtype=np.float32)
         s1 += b.sum(axis=(0, 2))
         s2 += (b.astype(np.float64) ** 2).sum(axis=(0, 2))
         cnt += b.shape[0] * b.shape[2]

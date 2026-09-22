@@ -24,6 +24,8 @@ from stend.vkr_eeg import config as C
 OUTDIR = os.path.join("outputs", "track_b")
 SRC = os.environ.get("VKR_STATS_SRC", os.path.join(OUTDIR, "decomposition_v2.json"))
 SUF = os.environ.get("VKR_STATS_SUFFIX", "")
+# VKR_STATS_UNIT=identity — для групповых фолдов: единица ресэмплинга — пациент, а не группа
+UNIT = os.environ.get("VKR_STATS_UNIT", "fold")
 
 
 def bootstrap_contributions(per_fold_vals, n_boot, seed, gamma=0.05):
@@ -65,6 +67,28 @@ def permutation_test_paired(a, b, n_perm, seed):
     return obs, (cnt + 1) / (n_perm + 1)
 
 
+def identity_level_sets(d, folds):
+    """Метрики по идентичностям из групповых фолдов (--group-folds в разложении).
+
+    Единица ресэмплинга и парного сравнения — идентичность, как и в остальных
+    прогонах, а не группа: при 10 группах бутстрэп по 10 точкам был бы почти
+    дискретным. Берутся идентичности, у которых метрика определена во всех четырёх
+    протоколах (в eval есть и приступные, и фоновые окна); ROC-AUC по идентичностям
+    не пишется, поэтому здесь только F1 и AUPRC.
+    """
+    units, sets = [], {"f1": {}, "auprc": {}}
+    prs = ["P0", "P1", "P1e", "P2"]
+    for f in folds:
+        per = {pr: d["per_fold"][f]["protocols"][pr].get("per_identity", {}) for pr in prs}
+        for J in per["P0"]:
+            if all(per[pr].get(J) for pr in prs):
+                units.append(J)
+                for met in sets:
+                    for pr in prs:
+                        sets[met].setdefault(pr, []).append(per[pr][J][met])
+    return units, {met: {pr: np.array(v, float) for pr, v in s.items()} for met, s in sets.items()}
+
+
 def main():
     d = json.load(open(SRC))
     folds = [k for k, v in d["per_fold"].items() if "protocols" in v]
@@ -72,6 +96,12 @@ def main():
     for met in ["f1", "auprc", "roc_auc"]:
         metric_sets[met] = {pr: np.array([d["per_fold"][f]["protocols"][pr][met] for f in folds], float)
                             for pr in ["P0", "P1", "P1e", "P2"]}
+    unit_note = "идентичность (не окно): окна внутри пациента зависимы"
+    if UNIT == "identity":
+        folds, metric_sets = identity_level_sets(d, folds)
+        unit_note = ("идентичность внутри групповых фолдов: метрики каждого пациента на его "
+                     "части eval; пациенты без приступных окон в eval исключены")
+        print(f"единица — идентичность: {len(folds)} пациентов с определённой метрикой")
 
     # ---------- Б2: ДИ вкладов ----------
     boot = {}
@@ -90,7 +120,7 @@ def main():
                      "script": "stend/runs_v2/run_stats.py", "python": platform.python_version(),
                      "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                      "source": SRC},
-        "unit_of_resampling": "идентичность (не окно): окна внутри пациента зависимы",
+        "unit_of_resampling": unit_note,
         "n_identities": len(folds),
         "identities": folds,
         "contributions": boot,
@@ -109,8 +139,11 @@ def main():
         res = {"P0_vs_P2": {"mean_difference": obs, "permutation_p": p_perm,
                             "n_permutations": 20000}}
         try:
+            # точное распределение — при десятках пар; при сотнях идентичностей
+            # (TUSZ) оно не нужно и считается долго, берётся нормальная аппроксимация
             w = stats.wilcoxon(m["P0"], m["P2"], alternative="two-sided",
-                               zero_method="wilcox", method="exact")
+                               zero_method="wilcox",
+                               method="exact" if len(m["P0"]) <= 50 else "approx")
             res["P0_vs_P2"]["wilcoxon_stat"] = float(w.statistic)
             res["P0_vs_P2"]["wilcoxon_p"] = float(w.pvalue)
         except Exception as e:
@@ -121,6 +154,7 @@ def main():
         sig[met] = res
 
     out_s = {
+        "unit_of_pairing": unit_note,
         "passport": {"seed": C.SEED, "script": "stend/runs_v2/run_stats.py",
                      "scipy": stats.__name__ and __import__("scipy").__version__,
                      "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

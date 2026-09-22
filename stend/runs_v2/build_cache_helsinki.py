@@ -111,7 +111,10 @@ def main():
     print(f"файлов ЭЭГ: {len(files)}, субъектов в разметке: {len(ann)}", flush=True)
 
     # --- исправление заголовков и оценка объёма ---
-    est, usable = 0, []
+    # Отбракованные здесь файлы обязаны попадать в паспорт среза, а не только в журнал:
+    # иначе «79 субъектов набора» и фактический состав среза расходятся молча, и число
+    # n_dropped в артефакте оказывается нулевым при реально отброшенных записях.
+    est, usable, skipped = 0, [], []
     for f in files:
         sid = re.findall(r"\d+", f)[0]
         src, dst = os.path.join(ROOT, f), os.path.join(FIXED, f)
@@ -120,10 +123,14 @@ def main():
         try:
             raw = mne.io.read_raw_edf(dst, preload=False, verbose="ERROR")
         except Exception as e:
-            print(f"  {f}: не открылся ({e})", flush=True); continue
+            print(f"  {f}: не открылся ({type(e).__name__}: {e})", flush=True)
+            skipped.append({"file": f, "reason": f"не открылся ({type(e).__name__}: {e})"})
+            continue
         nm = {norm_ch(c) for c in raw.ch_names}
         if any(a not in nm or b not in nm for a, b in BIPOLAR.values()):
-            print(f"  {f}: неполный монтаж", flush=True); continue
+            print(f"  {f}: неполный монтаж", flush=True)
+            skipped.append({"file": f, "reason": "неполный канонический монтаж"})
+            continue
         n = int(raw.n_times * (C.SFREQ / raw.info["sfreq"]))
         est += max(0, (n - WIN) // STEP + 1)
         usable.append((sid, dst))
@@ -201,7 +208,9 @@ def main():
             "n_subjects": len(set(subj_l)), "n_subjects_with_seizures": len(with_sz),
             "consensus_required": args.consensus,
             "windows_by_agreement": {str(v): int((agree == v).sum()) for v in (0, 1, 2, 3)},
-            "dropped": dropped, "n_dropped": len(dropped), "notch_hz": NOTCH_EU,
+            "dropped": dropped, "n_dropped": len(dropped),
+            "skipped_at_prescan": skipped, "n_skipped_at_prescan": len(skipped),
+            "n_files_in_source": len(files), "notch_hz": NOTCH_EU,
             "seed": C.SEED, "elapsed_min": round((time.time() - t0) / 60, 1),
             "note": ("новорождённые; отведения вычислены из монополярных каналов; "
                      "метка — консенсус экспертов; заголовки EDF исправлены (поле даты "
@@ -209,7 +218,8 @@ def main():
     json.dump(meta, open(os.path.join(OUT, "cache_meta.json"), "w"), ensure_ascii=False, indent=2)
     print(json.dumps({k: meta[k] for k in
                       ("n_windows", "n_seizure_windows", "positive_rate", "n_subjects",
-                       "n_subjects_with_seizures", "windows_by_agreement", "n_dropped")},
+                       "n_subjects_with_seizures", "windows_by_agreement", "n_dropped",
+                       "n_skipped_at_prescan", "n_files_in_source")},
                      ensure_ascii=False, indent=2))
     print("готово:", Xp)
 

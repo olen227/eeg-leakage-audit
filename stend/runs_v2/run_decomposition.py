@@ -5,7 +5,10 @@
 Схема протоколов и разложения описана в protocols.py.
 
 Оценочная схема: LOIO-CV — leave-one-identity-out, фактическим перебором фолдов.
-Ни одно число не вписывается константой.
+Для наборов с сотнями пациентов (TUSZ) — групповые фолды, ключ --group-folds K:
+идентичности делятся на K групп, группа откладывается целиком; дополнительно
+пишутся метрики по каждой идентичности группы. Ни одно число не вписывается
+константой.
 
 Выход: outputs/track_b/<tag>.json, имя задаётся ключом --tag.
 Итоговые числа работы получены с --tag decomposition_24 на кэше полного набора.
@@ -74,6 +77,22 @@ def subsample_negatives(train_idx, y, neg_ratio, seed):
     return train_idx[sel], {"applied": True, "neg_ratio": neg_ratio,
                             "n_before": int(len(train_idx)), "n_after": int(len(sel)),
                             "n_pos": int(len(pos)), "n_neg": int(k)}
+
+
+def load_rows(X, idx, chunk=4096):
+    """Скопировать окна idx из memmap в оперативную память одним проходом.
+
+    ЗАЧЕМ. На TUSZ обучающая часть протокола — сотни тысяч окон, и чтение их с диска
+    вразнобой на каждой эпохе (12 эпох × 4 протокола) при 32 ГБ памяти переводит
+    систему в режим подкачки: первый же протокол не завершил ни одной эпохи за 20
+    минут. Индексы после подвыборки отсортированы, поэтому чтение блоками почти
+    последовательное; далее все эпохи идут из памяти. Порядок перемешивания и всё
+    остальное обучение не меняются.
+    """
+    out = np.empty((len(idx),) + X.shape[1:], dtype=X.dtype)
+    for k in range(0, len(idx), chunk):
+        out[k:k + chunk] = X[idx[k:k + chunk]]
+    return out
 
 
 def train_detector_mm(X, train_idx, y, mu, sd, device, epochs, seed, log=None):
@@ -171,7 +190,8 @@ def slice_provenance(cache_dir):
     name = os.path.basename(os.path.normpath(cache_dir))
     known = {"full24": ("PROVENANCE_24.json", "все файлы 24 субъектов CHB-MIT, 676 файлов"),
              "siena": (None, "набор Siena, 14 субъектов"),
-             "helsinki": (None, "набор Helsinki, 79 новорождённых")}
+             "helsinki": (None, "набор Helsinki, 79 новорождённых"),
+             "tusz": (None, "набор TUSZ v2.0.6, взрослые, состав среза в cache_meta.json")}
     prov, note = known.get(name, (None, f"кэш {name}"))
     h = None
     if prov:
@@ -188,6 +208,10 @@ def main():
     ap.add_argument("--tag", type=str, default="decomposition_v2")
     ap.add_argument("--cache", type=str, default="", help="каталог кэша (по умолчанию VKR_CACHE_ROOT)")
     ap.add_argument("--max-folds", type=int, default=0, help="ограничить число фолдов (0 = все)")
+    ap.add_argument("--group-folds", type=int, default=0,
+                    help="K > 0: разбить идентичности на K групп и откладывать группу целиком "
+                         "(для наборов, где перебор по одной идентичности неподъёмен: "
+                         "TUSZ, 675 пациентов). 0 = по одной идентичности в фолд")
     ap.add_argument("--neg-ratio", type=float, default=0.0,
                     help="межприступных окон на одно приступное в обучении (0 = все окна)")
     ap.add_argument("--norm-sample", type=int, default=0,
@@ -200,6 +224,9 @@ def main():
     ap.add_argument("--widths", type=str, default="",
                     help="ширина четырёх блоков усиленного детектора через запятую, "
                          "например 8,16,32,64; задаёт ёмкость модели при неизменной архитектуре")
+    ap.add_argument("--ram-train", action="store_true",
+                    help="загрузить обучающую подвыборку протокола в память один раз "
+                         "(для больших кэшей: иначе каждая эпоха читает диск вразнобой)")
     ap.add_argument("--resume", action="store_true",
                     help="продолжить прогон: уже посчитанные фолды взять из "
                          "<tag>_partial.json, объединённые предсказания — из <tag>_pooled.npz")
@@ -222,7 +249,7 @@ def main():
     subjects = sorted(set(subj.tolist()))
     ident_of = P.build_identity_map(subjects)
     identities = sorted(set(ident_of.values()))
-    if args.folds:
+    if args.folds and not args.group_folds:      # при групповых фолдах фильтр — по именам групп ниже
         identities = [i for i in identities if i in args.folds.split(",")]
     if args.max_folds and len(identities) > args.max_folds:
         # детерминированный отбор подмножества идентичностей (seed фиксирован)
@@ -230,8 +257,22 @@ def main():
         identities = [identities[i] for i in sorted(pick)]
         print(f"ограничение: {args.max_folds} фолдов из {len(set(ident_of.values()))}", flush=True)
 
+    # Групповые фолды: идентичности перемешиваются с каноническим seed и делятся на K
+    # почти равных групп. Имя фолда — G01..GK, состав группы записывается в результат.
+    fold_members = {I: [I] for I in identities}
+    if args.group_folds:
+        pm = np.random.default_rng(C.SEED).permutation(len(identities))
+        parts = np.array_split(pm, args.group_folds)
+        fold_members = {f"G{g+1:02d}": sorted(identities[i] for i in part)
+                        for g, part in enumerate(parts)}
+        identities = list(fold_members)
+        if args.folds:
+            identities = [i for i in identities if i in args.folds.split(",")]
+        print(f"групповые фолды: {args.group_folds}, идентичностей в группе "
+              f"{[len(v) for v in fold_members.values()]}", flush=True)
+
     print(f"устройство: {device} | окон: {len(y)} | приступных: {int(y.sum())} "
-          f"({y.mean()*100:.3f} %)", flush=True)
+          f"({y.mean()*100:.3f} %) | тип {X.dtype}", flush=True)
     print(f"идентичности ({len(identities)}): {identities}", flush=True)
     print(f"группировка: {ident_of}", flush=True)
 
@@ -264,10 +305,12 @@ def main():
             print(f"\n=== фолд {I}: уже посчитан, пропуск ===", flush=True)
             continue
         print(f"\n=== фолд: отложена {I} ===", flush=True)
-        fold = P.make_fold(ident_of, subj, fid, t_abs, I, seed=C.SEED,
-                           embargo_sec=C.EMBARGO_SEC, y=y)
+        fold = P.make_fold(ident_of, subj, fid, t_abs,
+                           fold_members[I] if args.group_folds else I,
+                           seed=C.SEED, embargo_sec=C.EMBARGO_SEC, y=y)
         ev = fold["eval"]
         yev = y[ev]
+        ev_ident = np.array([ident_of[s] for s in subj[ev]])
         print(f"  eval: окон={len(ev)}, приступных={int(yev.sum())} | "
               f"файлов отложено {fold['n_files_held']}/{fold['n_files_total_I']} | "
               f"эмбарго убрало {fold['embargo_removed']} окон", flush=True)
@@ -290,6 +333,7 @@ def main():
                "embargo_removed_windows": fold["embargo_removed"],
                "eval_windows_without_abs_time": fold.get("n_eval_no_abs_time", 0),
                "degenerate_steps": fold.get("degenerate_steps", []),
+               "held_identities": fold.get("held_identities", [I]),
                "protocols": {}}
         for pr in protocols:
             tr_full = fold["train"][pr]
@@ -303,12 +347,20 @@ def main():
                 tr_norm = tr_full
             mu, sd = P.fold_norm_stats(X, tr_norm)
             tr, sub_info = subsample_negatives(tr_full, y, args.neg_ratio, args.seed)
-            det = (train_detector_v2(X, tr, y, mu, sd, device, args.epochs, args.seed,
+            if args.ram_train:
+                # обучение и калибровка порога идут по копии подвыборки в памяти;
+                # индексы локальные, метки — срез y по тем же окнам
+                Xtr, tr_loc, y_loc = load_rows(X, tr), np.arange(len(tr)), y[tr]
+                sub_info["ram_train_gb"] = round(Xtr.nbytes / 1e9, 2)
+            else:
+                Xtr, tr_loc, y_loc = X, tr, y
+            det = (train_detector_v2(Xtr, tr_loc, y_loc, mu, sd, device, args.epochs, args.seed,
                                      batch=args.batch or None,
                                      widths=_widths)
                    if args.detector == "v2"
-                   else train_detector_mm(X, tr, y, mu, sd, device, args.epochs, args.seed))
-            thr, f1_tr = calibrate_threshold_on_train(det, X, tr, y, mu, sd, device, args.seed)
+                   else train_detector_mm(Xtr, tr_loc, y_loc, mu, sd, device, args.epochs, args.seed))
+            thr, f1_tr = calibrate_threshold_on_train(det, Xtr, tr_loc, y_loc, mu, sd, device, args.seed)
+            del Xtr
             prob = predict_mm(det, X, ev, mu, sd, device)
             m = metrics_of(yev, prob, thr=thr)
             m["f1_at_0.5"] = float(f1_score(yev, (prob >= 0.5).astype(int), zero_division=0))
@@ -316,6 +368,19 @@ def main():
             m["train_n"] = int(len(tr)); m["train_pos"] = int(y[tr].sum())
             m["train_n_full"] = int(len(tr_full)); m["subsample"] = sub_info
             m["seconds"] = round(time.time() - t0, 1)
+            if args.group_folds:
+                # Метрики по каждой идентичности группы на её части eval: единица
+                # ресэмплинга для бутстрэпа — идентичность, а не группа. F1 у
+                # идентичности без приступных окон в eval не определена — null.
+                m["per_identity"] = {}
+                for J in fold["held_identities"]:
+                    sel = ev_ident == J
+                    yj = yev[sel]
+                    m["per_identity"][J] = (
+                        {"f1": float(f1_score(yj, (prob[sel] >= thr).astype(int), zero_division=0)),
+                         "auprc": float(average_precision_score(yj, prob[sel])),
+                         "n": int(sel.sum()), "n_pos": int(yj.sum())}
+                        if 0 < yj.sum() < len(yj) else None)
             res["protocols"][pr] = m
             pooled.setdefault(pr, {"y": [], "prob": [], "pred": []})
             pooled[pr]["y"].append(yev)
@@ -413,7 +478,11 @@ def main():
         "torch": torch.__version__,
         "numpy": np.__version__,
         "script": "stend/runs_v2/run_decomposition.py",
-        "input": os.path.join(V2, "X_raw.npy"),
+        # Путь входа берётся из фактического каталога кэша, а не из VKR_CACHE_ROOT:
+        # прежняя запись через корень кэша дала в паспортах Siena и Helsinki путь к
+        # кэшу CHB-MIT (поле cache_dir там верное, результаты не затронуты).
+        "input": os.path.join(cache_dir, "X_raw.npy"),
+        "x_dtype": str(X.dtype),
         # Срез выводится из фактического кэша, а не задан константой: при прогоне на
         # другом наборе зашитая строка сделала бы паспорт недостоверным, и число
         # перестало бы прослеживаться до данных, на которых получено.
@@ -430,6 +499,8 @@ def main():
         "batch": args.batch or C.DET_BATCH,
         "neg_ratio": args.neg_ratio,
         "norm_sample": args.norm_sample,
+        "group_folds": args.group_folds or None,
+        "ram_train": args.ram_train,
         "cache_dir": cache_dir,
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsed_sec": round(time.time() - t_start, 1),
