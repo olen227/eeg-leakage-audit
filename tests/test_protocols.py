@@ -318,3 +318,17 @@ def test_нормировка_из_float16_кэша_совпадает_с_float3
     assert mu16.dtype == np.float32 and sd16.dtype == np.float32
     assert np.allclose(mu16, mu32, atol=1e-2)
     assert np.allclose(sd16, sd32, rtol=1e-3)
+
+
+# --------------------------------------------------------------------------- #
+#          событийный счёт: записи не должны сопоставляться между собой
+# --------------------------------------------------------------------------- #
+def test_события_разных_файлов_не_сопоставляются():
+    from stend.runs_v2.run_event_continuous import score_protocol
+    y = np.zeros(200, int); y[50:60] = 1; y[150:155] = 1        # приступ в каждом файле
+    pred = np.zeros(200, int); pred[52:58] = 1; pred[100:104] = 1  # попадание в первом, ложная тревога во втором
+    files = np.array(["a|f1"] * 100 + ["a|f2"] * 100)
+    wtime = np.concatenate([np.arange(100) * 4.0, np.arange(100) * 4.0])  # время от начала СВОЕГО файла
+    sc, _ = score_protocol(y, pred, files, wtime, 1, 0)
+    e = sc["event_szcore_smoothed"]
+    assert e["detected"] == 1 and e["false_alarms"] == 1 and e["sensitivity"] == 0.5

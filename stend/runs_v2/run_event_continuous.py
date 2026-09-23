@@ -36,6 +36,7 @@ from stend.vkr_eeg import config as C
 from stend.runs_v2 import protocols as P
 from stend.runs_v2.run_decomposition import (get_device, subsample_negatives, train_detector_mm,
                                              predict_mm, calibrate_threshold_on_train,
+                                             calibrate_threshold_natural, load_rows,
                                              slice_provenance, V2)
 from stend.runs_v2.detector_v2 import train_detector_v2
 from stend.runs_v2.run_event_scoring import smooth, to_events
@@ -94,10 +95,13 @@ def score_protocol(y, pred, files, wtime, min_consec, merge_gap):
     """Собрать события по файлам (по времени) и посчитать обе схемы."""
     ref_all, hyp_all, hyp_raw_all = [], [], []
     sm_all = np.zeros_like(pred)
-    for f in np.unique(files):
+    for k, f in enumerate(np.unique(files)):
         sel = np.where(files == f)[0]
         o = sel[np.argsort(wtime[sel], kind="stable")]
-        t = wtime[o]
+        # wtime — от начала своего файла; без разноса события разных записей легли бы на
+        # одни координаты и сопоставлялись бы между файлами (обнаружено 23.09 на пробном
+        # прогоне: чувствительность и точность 1,0). Сдвиг — сутки на файл.
+        t = wtime[o] + k * 86400.0
         sm = smooth(pred[o], min_consec, merge_gap)
         sm_all[o] = sm
         ref_all += events_sec(y[o].astype(bool), t)
@@ -127,6 +131,10 @@ def main():
     ap.add_argument("--reference", default="decomposition_24",
                     help="прогон, с которым сверяется пооконная F1 на оценочной подвыборке")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--ram-train", action="store_true",
+                    help="обучающая подвыборка загружается в память один раз (см. run_decomposition)")
+    ap.add_argument("--calib", choices=["train", "natural"], default="train",
+                    help="калибровка порога, как в run_decomposition")
     args = ap.parse_args()
     widths = [int(x) for x in args.widths.split(",")] if args.widths else None
     protocols = args.protocols.split(",")
@@ -183,10 +191,18 @@ def main():
             tr_full = fold["train"][pr]
             mu, sd = P.fold_norm_stats(X, tr_full)
             tr, sub_info = subsample_negatives(tr_full, y, args.neg_ratio, args.seed)
-            det = (train_detector_v2(X, tr, y, mu, sd, device, args.epochs, args.seed, widths=widths)
+            if args.ram_train:
+                Xtr, tr_loc, y_loc = load_rows(X, tr), np.arange(len(tr)), y[tr]
+            else:
+                Xtr, tr_loc, y_loc = X, tr, y
+            det = (train_detector_v2(Xtr, tr_loc, y_loc, mu, sd, device, args.epochs, args.seed, widths=widths)
                    if args.detector == "v2" else
-                   train_detector_mm(X, tr, y, mu, sd, device, args.epochs, args.seed))
-            thr, f1_tr = calibrate_threshold_on_train(det, X, tr, y, mu, sd, device, args.seed)
+                   train_detector_mm(Xtr, tr_loc, y_loc, mu, sd, device, args.epochs, args.seed))
+            if args.calib == "natural":
+                thr, f1_tr = calibrate_threshold_natural(det, X, tr_full, y, mu, sd, device, args.seed)
+            else:
+                thr, f1_tr = calibrate_threshold_on_train(det, Xtr, tr_loc, y_loc, mu, sd, device, args.seed)
+            del Xtr
             prob = predict_mm(det, X, all_idx, mu, sd, device)
             pred = (prob >= thr).astype(int)
             f1_eval = float(f1_score(y[all_idx][ev_pos], pred[ev_pos], zero_division=0))
@@ -227,6 +243,7 @@ def main():
                         "data_slice": slice_note, "data_sha256": slice_hash, "seed": args.seed,
                         "epochs": args.epochs, "neg_ratio": args.neg_ratio, "detector": args.detector,
                         "widths": widths, "protocols": protocols, "min_consec_windows": args.min_consec,
+                        "ram_train": args.ram_train, "threshold_calibration": args.calib,
                         "merge_gap_windows": args.merge_gap,
                         "szcore": {"pre_tol_s": PRE_TOL, "post_tol_s": POST_TOL, "merge_s": MERGE_SEC, "split_s": SPLIT_SEC},
                         "device": str(device), "python": platform.python_version(), "torch": torch.__version__,

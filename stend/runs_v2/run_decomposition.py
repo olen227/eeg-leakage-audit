@@ -142,13 +142,47 @@ def calibrate_threshold_on_train(det, X, train_idx, y, mu, sd, device, seed,
     ytr = y[train_idx]
     pos = np.where(ytr == 1)[0]
     neg = np.where(ytr == 0)[0]
-    n_neg = min(len(neg), max(max_n - len(pos), 1))
+    # Межприступных окон в калибровочной выборке — не меньше, чем приступных. Прежняя
+    # запись max(max_n - len(pos), 1) при числе приступных окон выше бюджета (TUSZ:
+    # 37–42 тыс. против 30 тыс.) оставляла ОДНО межприступное окно, и порог вырождался в
+    # медиану вероятностей приступных окон. На CHB-MIT, Siena и Helsinki (≤ 9,7 тыс.
+    # приступных) ветвь не срабатывает, прежние прогоны воспроизводятся без изменений.
+    n_neg = min(len(neg), max(max_n - len(pos), len(pos)))
     sel = np.sort(np.concatenate([pos, rng.choice(neg, n_neg, replace=False)]))
     idx = train_idx[sel]
     prob = predict_mm(det, X, idx, mu, sd, device)
     yy = ytr[sel]
     best_t, best_f1 = 0.5, -1.0
     for t in np.quantile(prob, np.linspace(0.50, 0.9995, 200)):
+        f = f1_score(yy, (prob >= t).astype(int), zero_division=0)
+        if f > best_f1:
+            best_f1, best_t = f, float(t)
+    return best_t, float(best_f1)
+
+
+def calibrate_threshold_natural(det, X, train_full_idx, y, mu, sd, device, seed,
+                                max_n=200000):
+    """Порог по обучающей части В ЕЁ ЕСТЕСТВЕННОЙ ПРОПОРЦИИ классов (утечки нет).
+
+    ЗАЧЕМ. Калибровка на подвыборке 1:20 (или 1:5) отвечает распространённости 5–17 %
+    приступных окон, а в оценочной части их 0,3–6 %. Порог, оптимальный при одной
+    пропорции, при другой даёт лавину ложных срабатываний — отсюда занижение
+    абсолютной F1 втрое (пятое ограничение работы). Здесь калибровочная выборка
+    берётся случайно из ПОЛНОЙ обучающей части протокола, без подвыборки
+    межприступных окон, поэтому её пропорция классов совпадает с обучающей.
+    Оценочные окна не участвуют. Правило одно для всех протоколов фолда, так что
+    разности метрик остаются контролируемым измерением.
+    """
+    rng = np.random.default_rng(seed)
+    n = min(len(train_full_idx), max_n)
+    idx = np.sort(rng.choice(train_full_idx, n, replace=False))
+    prob = predict_mm(det, X, idx, mu, sd, device)
+    yy = y[idx]
+    if yy.sum() == 0:
+        return 0.5, 0.0
+    best_t, best_f1 = 0.5, -1.0
+    # сетка по квантилям вероятностей: при редком классе полезные пороги лежат в хвосте
+    for t in np.quantile(prob, np.concatenate([np.linspace(0.50, 0.99, 100), np.linspace(0.99, 0.99995, 200)])):
         f = f1_score(yy, (prob >= t).astype(int), zero_division=0)
         if f > best_f1:
             best_f1, best_t = f, float(t)
@@ -224,6 +258,10 @@ def main():
     ap.add_argument("--widths", type=str, default="",
                     help="ширина четырёх блоков усиленного детектора через запятую, "
                          "например 8,16,32,64; задаёт ёмкость модели при неизменной архитектуре")
+    ap.add_argument("--calib", choices=["train", "natural"], default="train",
+                    help="калибровка порога: train — на подвыборке обучающей части (как в итоговых "
+                         "прогонах); natural — на случайной выборке из ПОЛНОЙ обучающей части, "
+                         "в её естественной пропорции классов (снимает занижение абсолютной F1)")
     ap.add_argument("--ram-train", action="store_true",
                     help="загрузить обучающую подвыборку протокола в память один раз "
                          "(для больших кэшей: иначе каждая эпоха читает диск вразнобой)")
@@ -359,7 +397,10 @@ def main():
                                      widths=_widths)
                    if args.detector == "v2"
                    else train_detector_mm(Xtr, tr_loc, y_loc, mu, sd, device, args.epochs, args.seed))
-            thr, f1_tr = calibrate_threshold_on_train(det, Xtr, tr_loc, y_loc, mu, sd, device, args.seed)
+            if args.calib == "natural":
+                thr, f1_tr = calibrate_threshold_natural(det, X, tr_full, y, mu, sd, device, args.seed)
+            else:
+                thr, f1_tr = calibrate_threshold_on_train(det, Xtr, tr_loc, y_loc, mu, sd, device, args.seed)
             del Xtr
             prob = predict_mm(det, X, ev, mu, sd, device)
             m = metrics_of(yev, prob, thr=thr)
@@ -501,6 +542,7 @@ def main():
         "norm_sample": args.norm_sample,
         "group_folds": args.group_folds or None,
         "ram_train": args.ram_train,
+        "threshold_calibration": args.calib,
         "cache_dir": cache_dir,
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsed_sec": round(time.time() - t_start, 1),
